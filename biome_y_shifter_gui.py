@@ -86,17 +86,20 @@ def _iter_manual_curve_in_values(curve: dict[str, Any]) -> list[Number]:
             in_values.append(in_v)
     return in_values
 
+def _contains_water_fluid(node: Any) -> bool:
+    if isinstance(node, dict):
+        fluid = node.get("Fluid")
+        if isinstance(fluid, str) and fluid.lower().startswith("water"):
+            return True
+        return any(_contains_water_fluid(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_contains_water_fluid(i) for i in node)
+    return False
+
 def _is_water_node(node: Any) -> bool:
     if not isinstance(node, dict) or node.get("Type") != "SimpleHorizontal":
         return False
-    mat_provider = node.get("Material")
-    if isinstance(mat_provider, dict) and mat_provider.get("Type") == "Constant":
-        inner_mat = mat_provider.get("Material")
-        if isinstance(inner_mat, dict):
-            fluid = inner_mat.get("Fluid")
-            if isinstance(fluid, str) and fluid.lower().startswith("water"):
-                return True
-    return False
+    return _contains_water_fluid(node.get("Material"))
 
 def shift_biome_json(data: Any, *, delta_y: Number, shift_props: bool, water_delta: Number = 0, shift_water: bool = True) -> tuple[Any, ChangeCounts]:
     counts = ChangeCounts()
@@ -122,7 +125,7 @@ def shift_biome_json(data: Any, *, delta_y: Number, shift_props: bool, water_del
 
                 if node_type == "Slider":
                     slide_y = node.get("SlideY")
-                    if _is_number(slide_y) and _contains_type(node.get("Inputs"), target_type="YValue"):
+                    if _is_number(slide_y):
                         node["SlideY"] = _shift_number_preserve_int(slide_y, delta_y)
                         counts.y_sliders_shifted += 1
 
@@ -143,30 +146,37 @@ def shift_biome_json(data: Any, *, delta_y: Number, shift_props: bool, water_del
                         pass  # Skip processing this node completely
                     else:
                         shifted_simple = False
+                        shifted_water_ref = False
 
-                        def delta_for(base_height: Any, *, water_node: bool) -> Number | None:
-                            if base_height == "Base":
-                                return delta_y
+                        def delta_for(base_height: Any) -> Number | None:
                             if base_height == "Water":
-                                return water_delta if water_node else delta_y
+                                return water_delta if shift_water else None
+                            if base_height in ("Base", "Bedrock", "Absolute", None):
+                                return delta_y
                             return None
 
-                        top_delta = delta_for(node.get("TopBaseHeight"), water_node=is_water)
+                        top_base = node.get("TopBaseHeight")
+                        top_delta = delta_for(top_base)
                         if top_delta is not None:
                             top_y = node.get("TopY")
                             if _is_number(top_y):
                                 node["TopY"] = _shift_number_preserve_int(top_y, top_delta)
                                 shifted_simple = True
+                                if top_base == "Water":
+                                    shifted_water_ref = True
 
-                        bottom_delta = delta_for(node.get("BottomBaseHeight"), water_node=is_water)
+                        bottom_base = node.get("BottomBaseHeight")
+                        bottom_delta = delta_for(bottom_base)
                         if bottom_delta is not None:
                             bottom_y = node.get("BottomY")
                             if _is_number(bottom_y):
                                 node["BottomY"] = _shift_number_preserve_int(bottom_y, bottom_delta)
                                 shifted_simple = True
+                                if bottom_base == "Water":
+                                    shifted_water_ref = True
 
                         if shifted_simple:
-                            if is_water:
+                            if is_water or shifted_water_ref:
                                 counts.water_levels_shifted += 1
                             else:
                                 counts.simple_horizontal_shifted += 1
@@ -338,8 +348,17 @@ class BiomeShifterApp:
         ToolTip(chk_backup, "Creates a duplicate of your json before modifying it in-place in case of errors.")
 
         # Button row with a little extra padding above and below
-        btn = tk.Button(frame, text="Select JSON Files & Process", command=self.process_files, font=("Segoe UI", 11, "bold"), bg="#4CAF50", fg="white", padx=15, pady=8, cursor="hand2", borderwidth=0)
-        btn.grid(row=8, column=0, columnspan=2, pady=20)
+        btn_frame = tk.Frame(frame)
+        btn_frame.grid(row=8, column=0, columnspan=2, pady=20)
+        
+        self.btn_select = tk.Button(btn_frame, text="Select JSON Files", command=self.select_files, font=("Segoe UI", 11, "bold"), bg="#2196F3", fg="white", padx=15, pady=8, cursor="hand2", borderwidth=0)
+        self.btn_select.pack(side=tk.LEFT, padx=10)
+        
+        self.btn_run = tk.Button(btn_frame, text="Run Y-Shift", command=self.process_files, font=("Segoe UI", 11, "bold"), bg="#4CAF50", fg="white", disabledforeground="white", padx=15, pady=8, cursor="hand2", borderwidth=0)
+        self.btn_run.pack(side=tk.LEFT, padx=10)
+        self.btn_run.config(state=tk.DISABLED)
+        
+        self.selected_files = []
 
         # Ensure the log area correctly stretches
         self.log_area = scrolledtext.ScrolledText(frame, font=("Consolas", 10), borderwidth=1, relief=tk.SOLID)
@@ -360,7 +379,7 @@ class BiomeShifterApp:
             shift = int(round(float(val)))
 
             new_b = old_b - shift
-            new_w = old_w + shift
+            new_w = old_w - shift
 
             # Format to remove trailing .0 if integer
             self.new_base_var.set(f"{int(new_b) if float(new_b).is_integer() else new_b}")
@@ -389,25 +408,36 @@ class BiomeShifterApp:
             "It is intended for moving an entire biome up or down without changing its internal shapes, and for adjusting biomes when the framework Base constant changes. "
             "When enabled, it also processes values under 'Props' and updates detected water level nodes.\n\n"
             "NODES AFFECTED\n"
-            "- Slider (Type=Slider, YValue inputs): SlideY\n"
+            "- Slider (Type=Slider): SlideY\n"
             "- Linear scanner (Type=Linear, Axis=Y): Range.MinInclusive, Range.MaxExclusive\n"
             "- CurveMapper (Type=CurveMapper, Curve.Type=Manual): Points[].In (when treated as absolute height)\n"
             "- SimpleHorizontal (Type=SimpleHorizontal): TopY, BottomY\n"
-            "- Water SimpleHorizontal (detected water fluid): TopY, BottomY (uses delta_y + water_delta)\n\n"
+            "- Water-referenced SimpleHorizontal (Top/BottomBaseHeight=Water): TopY, BottomY (uses water_delta)\n"
+            "- Water fluid SimpleHorizontal (detected by Material.*.Fluid=Water_*): TopY, BottomY (uses water_delta)\n\n"
             "COMPUTED VALUES\n"
             "delta_y = Old_Base - New_Base\n"
-            "water_delta = New_Water - Old_Water\n\n"
+            "water_delta = Old_Water - New_Water\n\n"
             "APPLICATION RULES\n"
-            "For non-water nodes and layers, the tool adds delta_y to the relevant Y values. "
-            "For detected water SimpleHorizontal nodes, the tool adds (delta_y + water_delta) to TopY and BottomY.\n\n"
+            "For most height fields, the tool adds delta_y to preserve absolute heights after a Base change. "
+            "For Water-referenced fields (Top/BottomBaseHeight=Water), it adds water_delta instead (when water updates are enabled).\n\n"
             "GLOBAL VERTICAL SHIFT\n"
-            "The Global Vertical Shift control sets a shift value s (blocks) and updates the inputs so that delta_y = s and water_delta = s.\n"
+            "The Global Vertical Shift control sets a shift value s (blocks) and updates the inputs so that delta_y = s and water_delta = s (by adjusting New Base and New Water together).\n"
         )
         messagebox.showinfo("Biome Y-Shifter", help_text)
 
     def log(self, text: str):
         self.log_area.insert(tk.END, text + "\n")
         self.log_area.see(tk.END)
+
+    def select_files(self):
+        filepaths = filedialog.askopenfilenames(
+            title="Select Biome JSONs",
+            filetypes=[("JSON Files", "*.json")]
+        )
+        if filepaths:
+            self.selected_files = filepaths
+            self.log(f"Selected {len(filepaths)} files.")
+            self.btn_run.config(state=tk.NORMAL)
 
     def process_files(self):
         try:
@@ -420,16 +450,13 @@ class BiomeShifterApp:
             return
 
         delta_y = old_base - new_base
-        water_delta = new_water - old_water
+        water_delta = old_water - new_water
 
         shift_props = self.shift_props_var.get()
         shift_water = self.shift_water_var.get()
         make_backup = self.backup_var.get()
 
-        filepaths = filedialog.askopenfilenames(
-            title="Select Biome JSONs",
-            filetypes=[("JSON Files", "*.json")]
-        )
+        filepaths = self.selected_files
 
         if not filepaths:
             return

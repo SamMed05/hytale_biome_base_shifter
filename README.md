@@ -15,29 +15,31 @@ Typical uses:
 python biome_y_shifter_gui.py
 ```
 
-Then click *Select JSON Files & Process* and pick one or more `.json` files.
+Then click *Select JSON Files*, pick one or more `.json` files, and then click *Run Y-Shift*.
 
 ## What it changes
 
 It scans the JSON and shifts height-related fields in these nodes:
 
-- `Slider` (only when it has `YValue` inputs): `SlideY`
+- `Slider`: `SlideY`
 - `Linear` (only when `Axis = "Y"`): `Range.MinInclusive`, `Range.MaxExclusive`
 - `CurveMapper` (only when `Curve.Type = "Manual"`): `Points[].In` (only when the values look like *absolute* heights)
-- `SimpleHorizontal`: `TopY`, `BottomY` (only when `TopBaseHeight` / `BottomBaseHeight` are `"Base"` or `"Water"`)
-- Water `SimpleHorizontal` nodes: also `TopY`, `BottomY` (when detected as water by `Material -> Constant -> Material.Fluid` starting with `"water"`)
+- `SimpleHorizontal`: `TopY`, `BottomY`
+	- for `Base`, `Bedrock`, `Absolute`, or omitted base heights: uses `delta_y`
+	- for `Water`: uses `water_delta` (only when *Update water levels* is enabled)
+- Water fluid `SimpleHorizontal` nodes: `TopY`, `BottomY` (detected by `Material.*.Fluid` starting with `"water"`, uses `water_delta`)
 
 ## How the shift is computed
 
 The tool computes two deltas from your inputs:
 
 - `delta_y = Old Base - New Base`
-- `water_delta = New Water - Old Water`
+- `water_delta = Old Water - New Water`
 
 Rules:
 
 - For non-water nodes, it adds `delta_y` to the affected Y fields.
-- For detected water `SimpleHorizontal` nodes (when *Update water levels* is enabled), it adds `delta_y + water_delta`.
+- For Water-referenced `SimpleHorizontal` fields (`TopBaseHeight`/`BottomBaseHeight` = `"Water"`), it adds `water_delta` (when *Update water levels* is enabled).
 
 ### Global Vertical Shift slider
 
@@ -54,6 +56,6 @@ If you use ***Global Vertical Shift (blocks)*** with value `s`:
 
 ## Reverting
 
-This tool edits files directly (in-place) when you press `Select JSON Files & Process`.
+This tool edits files directly (in-place) when you press `Run Y-Shift`.
 
 If you enabled backups, restore the `.bak` file (or copy it back over the modified `.json`).
